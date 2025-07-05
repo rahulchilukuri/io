@@ -1,12 +1,12 @@
-package com.example.multithreading.blocking;
+package com.example.networking.tcp.server;
+import com.example.networking.tcp.client.ClientHandler;
+
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-
-import com.example.multithreading.ClientHandler;
 
 /**
  * The Server class listens for incoming client connections and
@@ -100,7 +100,7 @@ public class BlockingServer {
     }
 
     public static void main(String[] args) {
-        com.example.multithreading.blocking.BlockingServer server = new com.example.multithreading.blocking.BlockingServer();
+        BlockingServer server = new BlockingServer();
         server.start();
     }
 }

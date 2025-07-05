@@ -1,4 +1,4 @@
-package com.example.multithreading.blocking;
+package com.example.networking.tcp.client;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -14,7 +14,7 @@ import java.util.concurrent.TimeUnit;
  * This version can simulate multiple concurrent clients connecting to the server
  * using a thread pool.
  */
-public class BlockingMultipleClients {
+public class MultipleClients {
     private static final String SERVER_ADDRESS = "localhost"; // Server IP address or hostname
     private static final int SERVER_PORT = 12345; // Server port number
     private static final int NUMBER_OF_SIMULATED_CLIENTS = 50; // Number of concurrent clients to simulate

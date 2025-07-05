@@ -1,8 +1,9 @@
-package com.example.multithreading.nonblocking;
+package com.example.networking.tcp.server;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
+import java.nio.channels.ClosedChannelException; // Import this
 import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.ServerSocketChannel;
@@ -16,7 +17,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * multiple client connections efficiently with a single thread (or a few).
  * It uses a Selector to monitor channels for readiness events.
  */
-public class NonBlockingIOServer {
+public class NIOServer {
     private static final int PORT = 12345; // Port number for the server
     private static final int BUFFER_SIZE = 1024; // Size of the read/write buffer
 
@@ -30,7 +31,7 @@ public class NonBlockingIOServer {
 
     private volatile boolean running = true; // Flag to control server's running state
 
-    public NonBlockingIOServer() {
+    public NIOServer() {
         // No ExecutorService for client handling directly in this non-blocking model,
         // as a single thread handles all I/O events.
         // If heavy processing is needed, a separate processing thread pool would be used.
@@ -74,11 +75,14 @@ public class NonBlockingIOServer {
                     SelectionKey key = keys.next();
                     keys.remove(); // Remove the key from the selected set to avoid processing it again
 
-                    try {
-                        if (!key.isValid()) {
-                            continue; // Skip invalid keys
-                        }
+                    // --- Critical: Check key validity FIRST ---
+                    if (!key.isValid()) {
+                        // This key might have been canceled or its channel closed
+                        // during a previous event handling in this or another thread.
+                        continue;
+                    }
 
+                    try {
                         if (key.isAcceptable()) {
                             // A new connection is ready to be accepted
                             acceptConnection(key);
@@ -89,20 +93,27 @@ public class NonBlockingIOServer {
                             // A channel is ready for writing data
                             writeData(key);
                         }
+                    } catch (ClosedChannelException e) {
+                        // This specifically handles cases where the channel was already closed.
+                        // It's common and not necessarily an "error" in the sense of a bug.
+                        System.err.println("Channel already closed while processing key for " + key.channel() + ": " + e.getMessage());
+                        closeClientChannel((SocketChannel) key.channel(), key); // Ensure clean up
                     } catch (IOException e) {
-                        // Handle client disconnection or other I/O errors
-                        System.err.println("Error processing key for " + key.channel() + ": " + e.getMessage());
-                        key.cancel(); // Invalidate the key
-                        try {
-                            key.channel().close(); // Close the channel
-                        } catch (IOException ex) {
-                            System.err.println("Error closing channel: " + ex.getMessage());
-                        }
+                        // Handle other unexpected I/O errors during read/write
+                        System.err.println("I/O error processing key for " + key.channel() + ": " + e.getMessage());
+                        e.printStackTrace(); // Print stack trace for debugging
+                        closeClientChannel((SocketChannel) key.channel(), key); // Ensure clean up
+                    } catch (Exception e) {
+                        // Catch any other unexpected runtime exceptions
+                        System.err.println("Unexpected error processing key for " + key.channel() + ": " + e.getClass().getSimpleName() + " - " + e.getMessage());
+                        e.printStackTrace();
+                        closeClientChannel((SocketChannel) key.channel(), key); // Ensure clean up
                     }
                 }
             }
         } catch (IOException e) {
             System.err.println("Could not start non-blocking server on port " + PORT + ": " + e.getMessage());
+            e.printStackTrace(); // Print stack trace for server startup errors
             running = false;
         } finally {
             stop(); // Ensure resources are closed
@@ -137,16 +148,15 @@ public class NonBlockingIOServer {
         int bytesRead = clientChannel.read(readBuffer); // Read data into the buffer
 
         if (bytesRead == -1) {
-            // Client has closed the connection
-            System.out.println("Client disconnected: " + clientChannel.getRemoteAddress());
-            clientChannel.close(); // Close the channel
-            key.cancel(); // Cancel the key
-            writeBuffers.remove(clientChannel); // Remove any pending write data for this client
+            // Client has closed the connection (EOF)
+            System.out.println("Client disconnected cleanly: " + clientChannel.getRemoteAddress());
+            closeClientChannel(clientChannel, key);
             return;
         }
 
         if (bytesRead > 0) {
             readBuffer.flip(); // Prepare buffer for reading (limit = current position, position = 0)
+            // Convert ByteBuffer to String, assuming single line per read for simplicity.
             byte[] data = new byte[bytesRead];
             readBuffer.get(data);
             String clientMessage = new String(data).trim(); // Convert bytes to string
@@ -154,21 +164,24 @@ public class NonBlockingIOServer {
             System.out.println("Received from client " + clientChannel.getRemoteAddress() + ": " + clientMessage);
 
             // Process the message and prepare a response
-            String responseMessage = "SERVER RESPONSE: " + clientMessage.toUpperCase() + " (Processed at " + System.currentTimeMillis() + ")";
+            String responseMessage = "SERVER RESPONSE: " + clientMessage.toUpperCase() + " (Processed at " + System.currentTimeMillis() + ")\n"; // Add newline!
             ByteBuffer responseBuffer = ByteBuffer.wrap(responseMessage.getBytes());
 
             // Store the response for writing
             writeBuffers.put(clientChannel, responseBuffer);
 
+            // Attach information for "bye" handling
+            if ("bye".equalsIgnoreCase(clientMessage)) {
+                key.attach(true); // Attach a boolean true to indicate "close after write"
+                System.out.println("Client " + clientChannel.getRemoteAddress() + " sent 'bye'. Preparing to close after response.");
+            } else {
+                key.attach(false); // Default to false if not "bye"
+            }
+
             // Register the channel for WRITE events (in addition to READ)
-            // This tells the selector that we are interested in knowing when we can write to this channel
             key.interestOps(key.interestOps() | SelectionKey.OP_WRITE);
 
-            // If the client sends "bye", prepare to close the connection after sending response
-            if ("bye".equalsIgnoreCase(clientMessage)) {
-                // We'll let the writeData handle the actual closing after sending "bye" response
-                System.out.println("Client " + clientChannel.getRemoteAddress() + " sent 'bye'. Preparing to close.");
-            }
+            selector.wakeup(); // Important: Wake up the selector immediately
         }
     }
 
@@ -185,21 +198,51 @@ public class NonBlockingIOServer {
             clientChannel.write(buffer); // Write data from the buffer to the channel
         }
 
+        // Check if all data has been written
         if (buffer == null || !buffer.hasRemaining()) {
             // All data has been written or there was no data to write
             writeBuffers.remove(clientChannel); // Remove the buffer
+
             // Remove OP_WRITE interest, as we have nothing more to write for now
             key.interestOps(key.interestOps() & ~SelectionKey.OP_WRITE);
-            // If the last message was "bye", close the channel now
-            // This check is a simplification; a more robust solution might use a flag
-            // associated with the client to indicate it's ready for final close.
-            if (key.isValid() && clientChannel.isOpen() && key.isReadable() && !writeBuffers.containsKey(clientChannel) && key.attachment() != null && ((String) key.attachment()).contains("bye")) {
+
+            // Check attachment for "bye" and close connection
+            Boolean closeAfterWrite = (Boolean) key.attachment();
+            if (closeAfterWrite != null && closeAfterWrite.booleanValue()) {
                 System.out.println("Closing client " + clientChannel.getRemoteAddress() + " after 'bye' response.");
-                clientChannel.close();
-                key.cancel();
+                closeClientChannel(clientChannel, key);
             }
         }
     }
+
+    // Helper method to consolidate client channel closing logic
+    private void closeClientChannel(SocketChannel clientChannel, SelectionKey key) {
+        String clientAddress = "unknown"; // Default address
+        try {
+            // Get the address BEFORE attempting to close the channel
+            if (clientChannel != null && clientChannel.getRemoteAddress() != null) {
+                clientAddress = clientChannel.getRemoteAddress().toString();
+            }
+        } catch (IOException e) {
+            // This might happen if getRemoteAddress() fails on a truly broken channel
+            System.err.println("Could not get remote address before closing: " + e.getMessage());
+        }
+
+        try {
+            if (clientChannel != null && clientChannel.isOpen()) {
+                clientChannel.close(); // Close the channel
+            }
+            if (key != null && key.isValid()) {
+                key.cancel(); // Cancel the key
+            }
+            writeBuffers.remove(clientChannel); // Remove any pending write data for this client
+            System.out.println("Client channel closed: " + clientAddress);
+        } catch (IOException e) {
+            System.err.println("Error closing client channel " + clientAddress + ": " + e.getMessage());
+            e.printStackTrace(); // Print stack trace for debugging
+        }
+    }
+
 
     /**
      * Stops the server gracefully by closing the selector and server channel.
@@ -208,6 +251,7 @@ public class NonBlockingIOServer {
         running = false; // Set running flag to false to stop the main loop
 
         if (selector != null) {
+            selector.wakeup(); // Important: Wake up the selector to break out of select()
             try {
                 // Close all registered channels
                 for (SelectionKey key : selector.keys()) {
@@ -219,6 +263,7 @@ public class NonBlockingIOServer {
                 System.out.println("Selector closed.");
             } catch (IOException e) {
                 System.err.println("Error closing selector: " + e.getMessage());
+                e.printStackTrace();
             }
         }
 
@@ -228,13 +273,14 @@ public class NonBlockingIOServer {
                 System.out.println("Server channel closed.");
             } catch (IOException e) {
                 System.err.println("Error closing server channel: " + e.getMessage());
+                e.printStackTrace();
             }
         }
         System.out.println("Server stopped.");
     }
 
     public static void main(String[] args) {
-        NonBlockingIOServer server = new NonBlockingIOServer();
+        NIOServer server = new NIOServer();
         server.start();
     }
 }

@@ -1,4 +1,4 @@
-package com.example.multithreading;
+package com.example.networking.tcp.client;
 
 import java.io.BufferedReader;
 import java.io.IOException;
