@@ -77,7 +77,7 @@ public class NIOServer {
 
                     // --- Critical: Check key validity FIRST ---
                     if (!key.isValid()) {
-                        // This key might have been canceled or its channel closed
+                        // This key might have been canceled or its chann el closed
                         // during a previous event handling in this or another thread.
                         continue;
                     }
